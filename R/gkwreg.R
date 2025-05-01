@@ -35,14 +35,23 @@
 #'   and \code{"logit"} for \eqn{\delta} (parameter in (0, 1)).
 #'   Supported link functions are:
 #'   \itemize{
-#'     \item \code{"log"}
-#'     \item \code{"logit"}
-#'     \item \code{"identity"}
-#'     \item \code{"inverse"} (i.e., 1/mu)
-#'     \item \code{"sqrt"}
-#'     \item \code{"probit"}
-#'     \item \code{"cloglog"} (complementary log-log)
+#'     \item \code{"log"}: logarithmic link, maps \eqn{(0, \infty)} to \eqn{(-\infty, \infty)}
+#'     \item \code{"identity"}: identity link, no transformation
+#'     \item \code{"inverse"}: inverse link, maps \eqn{x} to \eqn{1/x}
+#'     \item \code{"sqrt"}: square root link, maps \eqn{x} to \eqn{\sqrt{x}}
+#'     \item \code{"inverse-square"}: inverse squared link, maps \eqn{x} to \eqn{1/x^2}
+#'     \item \code{"logit"}: logistic link, maps \eqn{(0, 1)} to \eqn{(-\infty, \infty)}
+#'     \item \code{"probit"}: probit link, using normal CDF
+#'     \item \code{"cloglog"}: complementary log-log
+#'     \item \code{"cauchy"}: Cauchy link, using Cauchy CDF
 #'   }
+#' @param link_scale Either a single numeric value specifying the same scale for all
+#'   link functions, or a named list specifying the scale for each parameter's link
+#'   function (e.g., \code{list(alpha = 10, beta = 5, delta = 1)}). The scale affects
+#'   how the link function transforms the linear predictor. Default is 10 for most
+#'   parameters and 1 for parameters using probability-type links (such as \code{delta}).
+#'   For probability-type links (logit, probit, cloglog, cauchy), smaller values
+#'   produce more extreme transformations.
 #' @param start An optional named list providing initial values for the regression
 #'   coefficients. Parameter names should match the distribution parameters (alpha,
 #'   beta, etc.), and values should be vectors corresponding to the coefficients
@@ -152,6 +161,13 @@
 #' constraints during estimation. Users can specify alternative link functions suitable
 #' for the parameter's domain via the \code{link} argument.
 #'
+#' \strong{Link Scales:}
+#' The \code{link_scale} parameter allows users to control how aggressively the link
+#' function transforms the linear predictor. For probability-type links (logit, probit,
+#' cloglog, cauchy), smaller values (e.g., 1) produce more extreme transformations,
+#' while larger values (e.g., 10) produce more gradual transformations. For continuous
+#' parameters, scale values control the sensitivity of the transformation.
+#'
 #' \strong{Families and Parameters:}
 #' The function automatically handles parameter fixing based on the chosen \code{family}:
 #' \itemize{
@@ -181,70 +197,211 @@
 #'
 #' @examples
 #' \donttest{
-#' ## Example 1: Simple Kumaraswamy regression model ----
+#' ## -------------------------------------------------------------------------
+#' ## 1. Real-world Case Studies
+#' ## -------------------------------------------------------------------------
+#'
+#' ## Example 1: Food Expenditure Data
+#' # Load required package
+#' require(gkwreg)
+#'
+#' # Get FoodExpenditure data and create response variable 'y' as proportion of income spent on food
+#' food_data <- get_bounded_datasets("FoodExpenditure")
+#' food_data <- within(food_data, {
+#'   y <- food / income
+#' })
+#'
+#' # Define formula: y depends on 'persons' with 'income' as predictor for second parameter
+#' formu_fe <- y ~ persons | income
+#'
+#' # Fit Kumaraswamy model with log link for both parameters
+#' kw_model <- gkwreg(formu_fe, food_data,
+#'   family = "kw",
+#'   link = rep("log", 2), method = "nlminb"
+#' )
+#'
+#' # Display model summary and diagnostics
+#' summary(kw_model)
+#' plot(kw_model, use_ggplot = TRUE, arrange_plots = TRUE, sub.caption = "")
+#'
+#' ## Example 2: Gasoline Yield Data
+#' # Load GasolineYield dataset
+#' gasoline_data <- get_bounded_datasets("GasolineYield")
+#'
+#' # Formula: yield depends on batch and temperature
+#' # First part (for alpha/gamma) includes batch and temp
+#' # Second part (for beta/delta/phi) includes only temp
+#' formu_gy <- yield ~ batch + temp | temp
+#'
+#' # Fit Kumaraswamy model with log link and BFGS optimization
+#' kw_model_gas <- gkwreg(formu_gy, gasoline_data,
+#'   family = "kw",
+#'   link = rep("log", 2), method = "BFGS"
+#' )
+#'
+#' # Display results
+#' summary(kw_model_gas)
+#' plot(kw_model_gas, use_ggplot = TRUE, arrange_plots = TRUE, sub.caption = "")
+#'
+#' ## Example 3: SDAC Cancer Data
+#' # Load cancer survival dataset
+#' sdac_data <- get_bounded_datasets("sdac")
+#'
+#' # Formula: relative cumulative density ~ age adjustment + chemotherapy
+#' formu_sd <- rcd ~ ageadj + chemo
+#'
+#' # Fit Extended Kumaraswamy model
+#' ekw_model_gas <- gkwreg(formu_sd, sdac_data, family = "ekw", method = "BFGS")
+#' summary(ekw_model_gas)
+#' plot(ekw_model_gas, use_ggplot = TRUE, arrange_plots = TRUE, sub.caption = "")
+#'
+#' ## Example 4: Retinal Data
+#' # Load retinal dataset
+#' retinal_data <- get_bounded_datasets("retinal")
+#'
+#' # Formula for three parameters with different predictors
+#' # alpha ~ LogT + LogT2 + Level
+#' # beta  ~ LogT + Level
+#' # gamma ~ Time
+#' formu_rt <- Gas ~ LogT + LogT2 + Level | LogT + Level | Time
+#'
+#' # Fit Extended Kumaraswamy model
+#' ekw_model_ret <- gkwreg(formu_rt, retinal_data, family = "ekw", method = "nlminb")
+#' summary(ekw_model_ret)
+#' plot(ekw_model_ret, use_ggplot = TRUE, arrange_plots = TRUE, sub.caption = "")
+#'
+#' ## Example 5: Weather Task Agreement Data
+#' # Load the WeatherTask dataset
+#' df_weather <- get_bounded_datasets("WeatherTask")
+#'
+#' # Fit all seven distribution families to the 'agreement' variable
+#' fitall_weather <- gkwfitall(df_weather$agreement, method = "BFGS")
+#'
+#' # Compare model performance
+#' summary(fitall_weather) # Displays the comparison table
+#'
+#' # Identify the best family based on AIC
+#' best_family_code <- fitall_weather$comparison$Family[1]
+#'
+#' # Refit the best model for detailed analysis
+#' fit_best_weather <- gkwfit(
+#'   df_weather$agreement,
+#'   family = best_family_code,
+#'   method = "BFGS", profile = TRUE, plot = TRUE, silent = TRUE
+#' )
+#'
+#' # Generate Goodness-of-Fit report
+#' gof_report <- gkwgof(
+#'   fit_best_weather,
+#'   theme = ggplot2::theme_classic(),
+#'   plot = TRUE, print_summary = FALSE, verbose = FALSE
+#' )
+#' summary(gof_report) # Display GoF statistics
+#'
+#' # Extract fit statistics for all families
+#' results_weathertask_df <- do.call(rbind, lapply(fitall_weather$fits, function(f) {
+#'   extract_gof_stats(gkwgof(f,
+#'     plot = FALSE,
+#'     print_summary = FALSE, verbose = FALSE
+#'   ))
+#' }))
+#' results_weathertask_df <- results_weathertask_df[order(results_weathertask_df$AIC), ]
+#' row.names(results_weathertask_df) <- NULL
+#'
+#' # Generate diagnostic plots for best model
+#' plot(gkwgof(fit_best_weather, theme = ggplot2::theme_classic()), title = "")
+#'
+#' # Display formatted comparison table
+#' results_weathertask_df[
+#'   ,
+#'   c(
+#'     "family", "n_params", "logLik", "AIC", "BIC",
+#'     "KS", "AD", "RMSE", "pseudo_R2"
+#'   )
+#' ]
+#'
+#' ## -------------------------------------------------------------------------
+#' ## 2. Simulation Studies
+#' ## -------------------------------------------------------------------------
+#'
+#' ## Example 1: Simple Kumaraswamy Regression Model
+#' # Set seed for reproducibility
 #' set.seed(123)
 #' n <- 1000
 #' x1 <- runif(n, -2, 2)
 #' x2 <- rnorm(n)
 #'
-#' # True regression coefficients
+#' # Define true regression coefficients
 #' alpha_coef <- c(0.8, 0.3, -0.2) # Intercept, x1, x2
 #' beta_coef <- c(1.2, -0.4, 0.1) # Intercept, x1, x2
 #'
-#' # Generate linear predictors and transform to parameters using inverse link (exp)
+#' # Generate linear predictors and transform using exponential link
 #' eta_alpha <- alpha_coef[1] + alpha_coef[2] * x1 + alpha_coef[3] * x2
 #' eta_beta <- beta_coef[1] + beta_coef[2] * x1 + beta_coef[3] * x2
 #' alpha_true <- exp(eta_alpha)
 #' beta_true <- exp(eta_beta)
 #'
-#' # Generate responses from Kumaraswamy distribution (assuming rkw is available)
+#' # Generate responses from Kumaraswamy distribution
 #' y <- rkw(n, alpha = alpha_true, beta = beta_true)
-#' # Create data frame
 #' df1 <- data.frame(y = y, x1 = x1, x2 = x2)
 #'
-#' # Fit Kumaraswamy regression model using extended formula syntax
-#' # Model alpha ~ x1 + x2 and beta ~ x1 + x2
+#' # Fit Kumaraswamy regression model with formula notation
+#' # Model: alpha ~ x1 + x2 and beta ~ x1 + x2
 #' kw_reg <- gkwreg(y ~ x1 + x2 | x1 + x2, data = df1, family = "kw", silent = TRUE)
 #'
-#' # Display summary
+#' # Alternative model with custom link scales
+#' kw_reg2 <- gkwreg(y ~ x1 + x2 | x1 + x2,
+#'   data = df1, family = "kw",
+#'   link_scale = list(alpha = 5, beta = 8), silent = TRUE
+#' )
+#'
+#' # Display model summary
 #' summary(kw_reg)
 #'
-#' ## Example 2: Generalized Kumaraswamy regression ----
+#' ## Example 2: Generalized Kumaraswamy Regression
+#' # Set seed for reproducibility
 #' set.seed(456)
+#' n <- 1000
 #' x1 <- runif(n, -1, 1)
 #' x2 <- rnorm(n)
 #' x3 <- factor(rbinom(n, 1, 0.5), labels = c("A", "B")) # Factor variable
 #'
-#' # True regression coefficients
+#' # Define true regression coefficients for all parameters
 #' alpha_coef <- c(0.5, 0.2) # Intercept, x1
 #' beta_coef <- c(0.8, -0.3, 0.1) # Intercept, x1, x2
 #' gamma_coef <- c(0.6, 0.4) # Intercept, x3B
 #' delta_coef <- c(0.0, 0.2) # Intercept, x3B (logit scale)
 #' lambda_coef <- c(-0.2, 0.1) # Intercept, x2
 #'
-#' # Design matrices
+#' # Create design matrices
 #' X_alpha <- model.matrix(~x1, data = data.frame(x1 = x1))
 #' X_beta <- model.matrix(~ x1 + x2, data = data.frame(x1 = x1, x2 = x2))
 #' X_gamma <- model.matrix(~x3, data = data.frame(x3 = x3))
 #' X_delta <- model.matrix(~x3, data = data.frame(x3 = x3))
 #' X_lambda <- model.matrix(~x2, data = data.frame(x2 = x2))
 #'
-#' # Generate linear predictors and transform to parameters
+#' # Generate parameters through linear predictors and appropriate link functions
 #' alpha <- exp(X_alpha %*% alpha_coef)
 #' beta <- exp(X_beta %*% beta_coef)
 #' gamma <- exp(X_gamma %*% gamma_coef)
 #' delta <- plogis(X_delta %*% delta_coef) # logit link for delta
 #' lambda <- exp(X_lambda %*% lambda_coef)
 #'
-#' # Generate response from GKw distribution (assuming rgkw is available)
+#' # Generate response from Generalized Kumaraswamy distribution
 #' y <- rgkw(n, alpha = alpha, beta = beta, gamma = gamma, delta = delta, lambda = lambda)
-#'
-#' # Create data frame
 #' df2 <- data.frame(y = y, x1 = x1, x2 = x2, x3 = x3)
 #'
 #' # Fit GKw regression with parameter-specific formulas
-#' # alpha ~ x1, beta ~ x1 + x2, gamma ~ x3, delta ~ x3, lambda ~ x2
 #' gkw_reg <- gkwreg(y ~ x1 | x1 + x2 | x3 | x3 | x2, data = df2, family = "gkw")
+#'
+#' # Alternative model with custom link scales
+#' gkw_reg2 <- gkwreg(y ~ x1 | x1 + x2 | x3 | x3 | x2,
+#'   data = df2, family = "gkw",
+#'   link_scale = list(
+#'     alpha = 12, beta = 12, gamma = 12,
+#'     delta = 0.8, lambda = 12
+#'   )
+#' )
 #'
 #' # Compare true vs. estimated coefficients
 #' print("Estimated Coefficients (GKw):")
@@ -255,56 +412,55 @@
 #'   delta = delta_coef, lambda = lambda_coef
 #' ))
 #'
-#' ## Example 3: Beta regression for comparison ----
+#' ## Example 3: Beta Regression for Comparison
+#' # Set seed for reproducibility
 #' set.seed(789)
+#' n <- 1000
 #' x1 <- runif(n, -1, 1)
 #'
 #' # True coefficients for Beta parameters (gamma = shape1, delta = shape2)
-#' gamma_coef <- c(1.0, 0.5) # Intercept, x1 (log scale for shape1)
-#' delta_coef <- c(1.5, -0.7) # Intercept, x1 (log scale for shape2)
+#' gamma_coef <- c(1.0, 0.5) # Intercept, x1 (log scale)
+#' delta_coef <- c(1.5, -0.7) # Intercept, x1 (log scale)
 #'
-#' # Generate linear predictors and transform (default link is log for Beta params here)
+#' # Generate parameters through linear predictors and log link
 #' X_beta_eg <- model.matrix(~x1, data.frame(x1 = x1))
 #' gamma_true <- exp(X_beta_eg %*% gamma_coef)
 #' delta_true <- exp(X_beta_eg %*% delta_coef)
 #'
 #' # Generate response from Beta distribution
 #' y <- rbeta_(n, gamma_true, delta_true)
-#'
-#' # Create data frame
 #' df_beta <- data.frame(y = y, x1 = x1)
 #'
 #' # Fit Beta regression model using gkwreg
-#' # Formula maps to gamma and delta: y ~  x1 | x1
 #' beta_reg <- gkwreg(y ~ x1 | x1,
 #'   data = df_beta, family = "beta",
 #'   link = list(gamma = "log", delta = "log")
-#' ) # Specify links if non-default
+#' )
 #'
-#' ## Example 4: Model comparison using AIC/BIC ----
-#' # Fit an alternative model, e.g., Kumaraswamy, to the same beta-generated data
+#' ## Example 4: Model Comparison using AIC/BIC
+#' # Fit an alternative model (Kumaraswamy) to the same beta-generated data
 #' kw_reg2 <- try(gkwreg(y ~ x1 | x1, data = df_beta, family = "kw"))
 #'
+#' # Compare models using information criteria
 #' print("AIC Comparison (Beta vs Kw):")
 #' c(AIC(beta_reg), AIC(kw_reg2))
 #' print("BIC Comparison (Beta vs Kw):")
 #' c(BIC(beta_reg), BIC(kw_reg2))
 #'
-#' ## Example 5: Predicting with a fitted model
-#'
-#' # Use the Beta regression model from Example 3
+#' ## Example 5: Prediction with Fitted Models
+#' # Create new data for predictions
 #' newdata <- data.frame(x1 = seq(-1, 1, length.out = 20))
 #'
 #' # Predict expected response (mean of the Beta distribution)
 #' pred_response <- predict(beta_reg, newdata = newdata, type = "response")
 #'
-#' # Predict parameters (gamma and delta) on the scale of the link function
+#' # Predict parameters on the scale of the link function
 #' pred_link <- predict(beta_reg, newdata = newdata, type = "link")
 #'
-#' # Predict parameters on the original scale (shape1, shape2)
+#' # Predict parameters on the original scale
 #' pred_params <- predict(beta_reg, newdata = newdata, type = "parameter")
 #'
-#' # Plot original data and predicted mean response curve
+#' # Visualize fitted model and data
 #' plot(df_beta$x1, df_beta$y,
 #'   pch = 20, col = "grey", xlab = "x1", ylab = "y",
 #'   main = "Beta Regression Fit (using gkwreg)"
@@ -351,6 +507,7 @@ gkwreg <- function(formula,
                    data,
                    family = c("gkw", "bkw", "kkw", "ekw", "mc", "kw", "beta"),
                    link = NULL,
+                   link_scale = NULL,
                    start = NULL,
                    fixed = NULL,
                    method = c("nlminb", "BFGS", "Nelder-Mead", "CG", "SANN", "L-BFGS-B"),
@@ -402,6 +559,9 @@ gkwreg <- function(formula,
   # Process link functions
   link_list <- .process_link(link, param_names, fixed_params)
 
+  # Process link scales
+  link_scale_list <- .process_link_scale(link_scale, link_list, param_names, fixed_params)
+
   # Convert link strings to integers for TMB
   link_ints <- .convert_links_to_int(link_list)
 
@@ -419,7 +579,7 @@ gkwreg <- function(formula,
 
   # Validate response variable is in (0, 1)
   y_var <- model_data$y
-  .validate_data(y_var, length(param_names))
+  invisible(.validate_data(y_var, length(param_names)))
 
   # Initialize result list
   result <- list(
@@ -427,6 +587,7 @@ gkwreg <- function(formula,
     family = family,
     formula = formula,
     link = link_list,
+    link_scale = link_scale_list,
     param_names = param_names,
     fixed_params = fixed_params
   )
@@ -437,7 +598,7 @@ gkwreg <- function(formula,
   # Prepare TMB data with correct matrices based on family
   tmb_data <- .prepare_tmb_data(
     model_data, family, param_names, fixed_processed,
-    link_ints, y_var, param_positions
+    link_ints, link_scale_list, y_var, param_positions
   )
 
   # Prepare TMB parameters in the correct structure required by each family
@@ -447,7 +608,11 @@ gkwreg <- function(formula,
   )
 
   # Compile and load the appropriate TMB model based on the family
-  dll_name <- paste0(family, "reg")
+  if (family == "beta") {
+    dll_name <- "gkwbetareg"
+  } else {
+    dll_name <- paste0(family, "reg")
+  }
 
   if (!silent) {
     message("Using TMB model: ", dll_name)
@@ -615,6 +780,7 @@ gkwreg <- function(formula,
       lambdaVec = lambdaVec
     ),
     link = link_list,
+    link_scale = link_scale_list,
     param_names = param_names,
     fixed_params = fixed_params,
     loglik = fit_result$loglik,
@@ -649,8 +815,6 @@ gkwreg <- function(formula,
   # Return the final result
   return(result)
 }
-
-
 
 
 #' Prepare TMB Parameters for GKw Regression
@@ -764,6 +928,10 @@ gkwreg <- function(formula,
   return(formula_list)
 }
 
+
+
+
+
 #' Convert Link Function Names to TMB Integers
 #'
 #' @param link_list List of link function names
@@ -793,6 +961,33 @@ gkwreg <- function(formula,
 
   return(result)
 }
+
+
+
+# .convert_links_to_int <- function(link_list) {
+#   link_map <- c(
+#     "log" = 1,
+#     "logit" = 2,
+#     "probit" = 3,
+#     "cauchy" = 4,
+#     "cloglog" = 5,
+#     "identity" = 6,
+#     "sqrt" = 7,
+#     "inverse" = 8,
+#     "inverse-square" = 9
+#   )
+#
+#   result <- lapply(link_list, function(link) {
+#     if (link %in% names(link_map)) {
+#       return(link_map[link])
+#     } else {
+#       warning("Unsupported link function: ", link, ". Using log link instead.")
+#       return(1) # Default to log
+#     }
+#   })
+#
+#   return(result)
+# }
 
 
 #' Format Coefficient Names Based on Family and Model Matrices
@@ -962,6 +1157,88 @@ gkwreg <- function(formula,
 }
 
 
+#' Process Link Scales for GKw Regression
+#'
+#' @param link_scale A numeric value or list specifying scales for link functions.
+#' @param link_list List of link functions for each parameter.
+#' @param param_names Names of the parameters for the specified family.
+#' @param fixed_params List of fixed parameters.
+#' @return A list of link scales.
+#' @keywords internal
+.process_link_scale <- function(link_scale, link_list, param_names, fixed_params) {
+  # Default scale values based on link type
+  probability_link_types <- c("logit", "probit", "cloglog", "cauchy")
+
+  # Initialize default scales list
+  default_scales <- list()
+
+  # Set default scales based on parameter and link type
+  for (param in names(link_list)) {
+    if (link_list[[param]] %in% probability_link_types) {
+      default_scales[[param]] <- 10.0 # Default for probability-type links
+    } else {
+      default_scales[[param]] <- 1.0 # Default for other links
+    }
+  }
+
+  # If link_scale is NULL, use default scales
+  if (is.null(link_scale)) {
+    # Get default scales for non-fixed parameters with links
+    non_fixed_params <- intersect(names(link_list), setdiff(param_names, names(fixed_params)))
+    return(default_scales[non_fixed_params])
+  }
+
+  # If link_scale is a single numeric value, apply to all parameters
+  if (is.numeric(link_scale) && length(link_scale) == 1) {
+    # Validate scale value
+    if (link_scale <= 0) {
+      stop("link_scale must be positive")
+    }
+
+    # Apply the same scale to all non-fixed parameters with links
+    non_fixed_params <- intersect(names(link_list), setdiff(param_names, names(fixed_params)))
+    scale_list <- replicate(length(non_fixed_params), link_scale, simplify = FALSE)
+    names(scale_list) <- non_fixed_params
+    return(scale_list)
+  }
+
+  # If link_scale is a list, validate and return
+  if (is.list(link_scale) || is.numeric(link_scale) && length(link_scale) > 1) {
+    if (is.numeric(link_scale)) {
+      link_scale <- as.list(link_scale)
+      names(link_scale) <- intersect(names(link_list), setdiff(param_names, names(fixed_params)))
+    }
+
+    # Check if names of list match parameter names
+    scale_names <- names(link_scale)
+    if (is.null(scale_names) || !all(scale_names %in% param_names)) {
+      stop("Names of link_scale list must match parameter names for the chosen family")
+    }
+
+    # Check if all scales are positive
+    non_positive <- !unlist(lapply(link_scale, function(x) is.numeric(x) && x > 0))
+    if (any(non_positive)) {
+      stop("All link_scale values must be positive numbers")
+    }
+
+    # Remove scales for fixed parameters
+    fixed_param_names <- names(fixed_params)
+    link_scale <- link_scale[setdiff(scale_names, fixed_param_names)]
+
+    # For parameters that have a link but no specified scale, use defaults
+    missing_scales <- setdiff(names(link_list), names(link_scale))
+    if (length(missing_scales) > 0) {
+      link_scale <- c(link_scale, default_scales[missing_scales])
+    }
+
+    return(link_scale)
+  }
+
+  stop("link_scale must be either a numeric value or a list of numeric values")
+}
+
+
+
 #' Extract Model Data for GKw Regression
 #'
 #' @param formula_list List of formulas for each parameter.
@@ -1084,6 +1361,9 @@ gkwreg <- function(formula,
   return(fixed_combined)
 }
 
+
+
+
 #' Prepare TMB Data for GKw Regression
 #'
 #' @param model_data List of model data.
@@ -1091,11 +1371,12 @@ gkwreg <- function(formula,
 #' @param param_names Names of parameters.
 #' @param fixed List of fixed parameters and coefficients.
 #' @param link_ints List of link function integers.
+#' @param link_scale_list List of link scale values.
 #' @param y Response variable.
 #' @param param_positions Parameter position mapping for the family.
 #' @return A list with TMB data.
 #' @keywords internal
-.prepare_tmb_data <- function(model_data, family, param_names, fixed, link_ints, y, param_positions) {
+.prepare_tmb_data <- function(model_data, family, param_names, fixed, link_ints, link_scale_list, y, param_positions) {
   # Initialize TMB data
   tmb_data <- list(
     y = y,
@@ -1154,17 +1435,87 @@ gkwreg <- function(formula,
         tmb_data[[link_name]] <- link_ints[[param]]
       }
 
-      # Set appropriate scale for the parameter
-      if (param == "delta") {
-        tmb_data[[scale_name]] <- 1.0 # For delta, which uses logit link
-      } else {
-        tmb_data[[scale_name]] <- 10.0 # For other parameters, which typically use log link
+      # If link_scale exists for this parameter, use it
+      if (param %in% names(link_scale_list)) {
+        tmb_data[[scale_name]] <- link_scale_list[[param]]
       }
     }
   }
 
   return(tmb_data)
 }
+
+
+# .prepare_tmb_data <- function(model_data, family, param_names, fixed, link_ints, y, param_positions) {
+#   # Initialize TMB data
+#   tmb_data <- list(
+#     y = y,
+#     useMeanCache = 1, # Enable mean caching
+#     calcFitted = 1, # Calculate fitted values
+#     userChunkSize = 100 # Reasonable chunk size
+#   )
+#
+#   # All families need matrices and link types
+#   # The number of X matrices and link types needed depends on the family
+#   num_params <- switch(family,
+#     "gkw" = 5,
+#     "bkw" = 4,
+#     "kkw" = 4,
+#     "ekw" = 3,
+#     "mc" = 3,
+#     "kw" = 2,
+#     "beta" = 2
+#   )
+#
+#   # Initialize default matrices and links for all required parameters
+#   for (i in 1:num_params) {
+#     matrix_name <- paste0("X", i)
+#     link_name <- paste0("link_type", i)
+#     scale_name <- paste0("scale", i)
+#
+#     # Default empty matrix with 1 column (intercept only)
+#     tmb_data[[matrix_name]] <- matrix(0, nrow = length(y), ncol = 1)
+#
+#     # Default link is log (1) and scale is 10
+#     tmb_data[[link_name]] <- 1
+#     tmb_data[[scale_name]] <- 10.0
+#   }
+#
+#   # Fill in actual matrices and links for non-fixed parameters
+#   non_fixed_params <- setdiff(param_names, names(fixed))
+#
+#   for (param in non_fixed_params) {
+#     # Get TMB parameter position based on family
+#     tmb_pos <- param_positions[[param]]
+#
+#     # Skip if not mapped
+#     if (is.null(tmb_pos) || is.na(tmb_pos)) next
+#
+#     # Update matrix, link type and scale
+#     matrix_name <- paste0("X", tmb_pos)
+#     link_name <- paste0("link_type", tmb_pos)
+#     scale_name <- paste0("scale", tmb_pos)
+#
+#     # If parameter exists in model_data, use it
+#     if (param %in% names(model_data$matrices)) {
+#       tmb_data[[matrix_name]] <- model_data$matrices[[param]]
+#
+#       # If link exists, use it
+#       if (param %in% names(link_ints)) {
+#         tmb_data[[link_name]] <- link_ints[[param]]
+#       }
+#
+#       # Set appropriate scale for the parameter
+#       if (param == "delta") {
+#         tmb_data[[scale_name]] <- 1.0 # For delta, which uses logit link
+#       } else {
+#         tmb_data[[scale_name]] <- 10.0 # For other parameters, which typically use log link
+#       }
+#     }
+#   }
+#
+#   return(tmb_data)
+# }
 
 
 #' @title Extract Coefficients from a Fitted GKw Regression Model
@@ -1495,7 +1846,7 @@ print.summary.gkwreg <- function(x, digits = max(3, getOption("digits") - 3),
   }
 
   # Display convergence information
-  cat("\nConvergence status:", ifelse(x$convergence == 0, "Successful", "Failed"), "\n")
+  cat("\nConvergence status:", ifelse(as.numeric(x$convergence) == 1, "Successful", "Failed"), "\n")
   if (!is.null(x$iterations)) {
     cat("Iterations:", x$iterations, "\n")
   }
@@ -5915,6 +6266,225 @@ vcov.gkwreg <- function(object, complete = TRUE, ...) {
   # Return the variance-covariance matrix
   object$vcov
 }
+
+
+#' Access datasets from bounded response regression packages
+#'
+#' This function provides direct access to datasets from the 'betareg' and 'simplexreg'
+#' packages without copying them to your project files. It dynamically loads
+#' the requested dataset from the respective package's namespace.
+#'
+#' @param dataset_name A character string. The name of the dataset to retrieve.
+#' @param package A character string. The package containing the dataset. Must be one of
+#'   "betareg" or "simplexreg". If NULL (default), the function searches both packages.
+#' @param attach_to_namespace Logical. If TRUE, the dataset will be attached to
+#'   the calling environment. Default is FALSE.
+#'
+#' @examples
+#' \dontrun{
+#'
+#' # Example 1: Beta regression on ReadingSkills data
+#' # ------------------------------------------------
+#'
+#' # This example analyzes factors affecting reading accuracy in children with dyslexia.
+#'
+#' # Load ReadingSkills data
+#' reading_data <- get_bounded_datasets("ReadingSkills")
+#'
+#' # Fit beta regression model
+#' reading_model <- gkwreg(
+#'   accuracy ~ dyslexia + iq,
+#'   data = reading_data,
+#'   family = "beta",
+#'   link = list(gamma = "log", delta = "logit")
+#' )
+#'
+#' summary(reading_model)
+#'
+#' # Example 2: Kumaraswamy regression on FoodExpenditure data
+#' # --------------------------------------------------------
+#' # This example models the proportion of income spent on food.
+#'
+#' # Load FoodExpenditure data
+#' food_data <- get_bounded_datasets("FoodExpenditure")
+#' food_data$y <- food_data$food / food_data$income
+#'
+#' # Fit Kumaraswamy regression model
+#' food_model <- gkwreg(
+#'   y ~ persons,
+#'   data = food_data,
+#'   family = "kw",
+#'   link = list(alpha = "log", beta = "log")
+#' )
+#'
+#' summary(food_model)
+#'
+#' # Example 3: Exponential Kumaraswamy regression on retinal data
+#' # ------------------------------------------------------------
+#' # This example analyzes the decay of intraocular gas in retinal surgeries.
+#'
+#' # Load retinal data
+#' retinal_data <- get_bounded_datasets("retinal", package = "simplexreg")
+#'
+#' # Fit a Kumaraswamy - Kumaraswamy model
+#' retinal_model <- gkwreg(
+#'   Gas ~ LogT2 | Level | Time,
+#'   data = retinal_data,
+#'   family = "ekw"
+#' )
+#'
+#' summary(retinal_model)
+#' }
+#'
+#' @return A data frame containing the requested dataset.
+#' @seealso \code{\link{list_bounded_datasets}}
+#' @export
+get_bounded_datasets <- function(dataset_name, package = NULL, attach_to_namespace = FALSE) {
+  # List of available datasets by package
+  datasets <- list(
+    betareg = c(
+      "CarTask", "FoodExpenditure", "GasolineYield",
+      "ImpreciseTask", "LossAversion", "MockJurors",
+      "ReadingSkills", "StressAnxiety", "WeatherTask"
+    ),
+    simplexreg = c("retinal", "sdac")
+  )
+
+  # If package is NULL, search in both packages
+  if (is.null(package)) {
+    # Find which package contains the dataset
+    if (dataset_name %in% datasets$betareg) {
+      package <- "betareg"
+    } else if (dataset_name %in% datasets$simplexreg) {
+      package <- "simplexreg"
+    } else {
+      stop(paste0(
+        "Dataset '", dataset_name, "' not found in betareg or simplexreg packages. ",
+        "Available datasets are: ",
+        paste(c(datasets$betareg, datasets$simplexreg), collapse = ", ")
+      ))
+    }
+  } else {
+    # Validate specified package
+    if (!package %in% c("betareg", "simplexreg")) {
+      stop("Package must be one of 'betareg' or 'simplexreg'")
+    }
+
+    # Check if requested dataset exists in the specified package
+    if (!dataset_name %in% datasets[[package]]) {
+      stop(paste0(
+        "Dataset '", dataset_name, "' not found in ", package, " package. ",
+        "Available datasets are: ",
+        paste(datasets[[package]], collapse = ", ")
+      ))
+    }
+  }
+
+  # Check if the required package is installed
+  if (!requireNamespace(package, quietly = TRUE)) {
+    stop(
+      "The ", package, " package is needed for this function to work. ",
+      "Please install it with install.packages('", package, "')"
+    )
+  }
+
+  # Create temporary environment to load the data
+  temp_env <- new.env()
+
+  # Load the dataset into the temporary environment
+  utils::data(list = dataset_name, package = package, envir = temp_env)
+
+  # Get the dataset from the environment
+  dataset <- get(dataset_name, envir = temp_env)
+
+  # Optionally attach the dataset to the calling environment
+  if (attach_to_namespace) {
+    assign(dataset_name, dataset, envir = parent.frame())
+  }
+
+  # Return the dataset
+  return(dataset)
+}
+
+#' List all available datasets for bounded response regression
+#'
+#' @param package A character string. If specified, list only datasets from the given package.
+#'   Must be one of "betareg" or "simplexreg". If NULL (default), lists datasets from both packages.
+#'
+#' @return A data frame with names and descriptions of available datasets
+#'
+#' @examples
+#' \dontrun{
+#' # List all available datasets
+#' list_bounded_datasets()
+#'
+#' # List only betareg datasets
+#' list_bounded_datasets("betareg")
+#' }
+#'
+#' @seealso \code{\link{get_bounded_datasets}}
+#' @export
+list_bounded_datasets <- function(package = NULL) {
+  # Define datasets and descriptions
+  datasets <- list(
+    betareg = c(
+      "CarTask", "FoodExpenditure", "GasolineYield",
+      "ImpreciseTask", "LossAversion", "MockJurors",
+      "ReadingSkills", "StressAnxiety", "WeatherTask"
+    ),
+    simplexreg = c("retinal", "sdac")
+  )
+
+  descriptions <- list(
+    betareg = c(
+      "Partition-Primed Probability Judgement Task for Car Dealership",
+      "Proportion of Household Income Spent on Food",
+      "Estimation of Gasoline Yields from Crude Oil",
+      "Imprecise Probabilities for Sunday Weather and Boeing Stock Task",
+      "(No) Myopic Loss Aversion in Adolescents",
+      "Confidence of Mock Jurors in Their Verdicts",
+      "Dyslexia and IQ Predicting Reading Accuracy",
+      "Dependency of Anxiety on Stress",
+      "Weather Task with Priming and Precise and Imprecise Probabilities"
+    ),
+    simplexreg = c(
+      "Data on recorded decay of intraocular gas in complex retinal surgeries",
+      "Data on Autologous Peripheral Blood Stem Cell Transplants in Alberta Health Service"
+    )
+  )
+
+  # Filter by package if specified
+  if (!is.null(package)) {
+    if (!package %in% c("betareg", "simplexreg")) {
+      stop("Package must be one of 'betareg' or 'simplexreg'")
+    }
+
+    result <- data.frame(
+      Package = rep(package, length(datasets[[package]])),
+      Dataset = datasets[[package]],
+      Description = descriptions[[package]],
+      stringsAsFactors = FALSE
+    )
+  } else {
+    # Combine all datasets
+    result <- rbind(
+      data.frame(
+        Package = rep("betareg", length(datasets$betareg)),
+        Dataset = datasets$betareg,
+        Description = descriptions$betareg,
+        stringsAsFactors = FALSE
+      ),
+      data.frame(
+        Package = rep("simplexreg", length(datasets$simplexreg)),
+        Dataset = datasets$simplexreg,
+        Description = descriptions$simplexreg,
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  return(result)
+}
+
 
 
 ## usethis namespace: start
